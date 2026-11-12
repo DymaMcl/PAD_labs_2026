@@ -246,3 +246,64 @@ func TestReplayFromDLQ(t *testing.T) {
 		t.Fatal("republicarea unui ID cunoscut trebuie ignorata")
 	}
 }
+
+func TestOrderingPerKeyBlocksUntilAck(t *testing.T) {
+	b, _ := newTestBroker()
+	a1, a2, b1 := msg("A", 1), msg("A", 2), msg("B", 1)
+	b.Publish("q", a1)
+	b.Publish("q", a2)
+	b.Publish("q", b1)
+
+	ds := recv(b, 10)
+	if len(ds) != 2 || ds[0].Message.ID != a1.ID || ds[1].Message.ID != b1.ID {
+		t.Fatalf("astepta capetele cheilor A si B, primit %d mesaje", len(ds))
+	}
+	if len(recv(b, 10)) != 0 {
+		t.Fatal("A#2 nu trebuie livrat cat timp A#1 e in zbor")
+	}
+	b.Ack("q", ds[0].DeliveryID)
+	next := recv(b, 10)
+	if len(next) != 1 || next[0].Message.ID != a2.ID {
+		t.Fatalf("dupa ACK pe A#1 trebuia livrat A#2: %+v", next)
+	}
+}
+
+func TestOrderingPreservedAcrossRetry(t *testing.T) {
+	b, clk := newTestBroker()
+	a1, a2 := msg("A", 1), msg("A", 2)
+	b.Publish("q", a1)
+	b.Publish("q", a2)
+	d := recv(b, 10)[0]
+	b.Nack("q", d.DeliveryID, "temporar", true)
+	if len(recv(b, 10)) != 0 {
+		t.Fatal("A#2 a depasit A#1 aflat in backoff")
+	}
+	clk.Advance(time.Second)
+	if ds := recv(b, 10); len(ds) != 1 || ds[0].Message.ID != a1.ID {
+		t.Fatalf("astepta A#1 reincercat: %+v", ds)
+	}
+}
+
+func TestDeadLetterUnblocksKey(t *testing.T) {
+	b, _ := newTestBroker()
+	a1, a2 := msg("A", 1), msg("A", 2)
+	b.Publish("q", a1)
+	b.Publish("q", a2)
+	d := recv(b, 10)[0]
+	b.Nack("q", d.DeliveryID, "otravit", false)
+	if ds := recv(b, 10); len(ds) != 1 || ds[0].Message.ID != a2.ID {
+		t.Fatalf("dupa DLQ cheia trebuie deblocata: %+v", ds)
+	}
+}
+
+func TestCompetingConsumersDifferentKeys(t *testing.T) {
+	b, _ := newTestBroker()
+	for _, k := range []string{"A", "B", "C"} {
+		b.Publish("q", msg(k, 1))
+	}
+	c1 := b.Receive(context.Background(), "q", "c1", 2, 0, 0)
+	c2 := b.Receive(context.Background(), "q", "c2", 2, 0, 0)
+	if len(c1) != 2 || len(c2) != 1 {
+		t.Fatalf("distributie: c1=%d c2=%d", len(c1), len(c2))
+	}
+}

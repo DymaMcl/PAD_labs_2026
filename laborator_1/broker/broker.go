@@ -400,12 +400,23 @@ func (b *Broker) Receive(ctx context.Context, queueName, consumer string, max in
 	}
 }
 
+// takeLocked selecteaza mesajele livrabile respectand ordonarea per cheie:
+// doar mesajul cel mai vechi (capul) al fiecarei chei poate fi livrat. Cat
+// timp capul este in zbor sau asteapta reincercarea (backoff), mesajele
+// urmatoare cu aceeasi cheie sunt blocate. Cheile diferite nu se blocheaza
+// intre ele, deci mai multi consumeri pot lucra in paralel pe chei diferite.
 func (b *Broker) takeLocked(q *queue, consumer string, max int, lease time.Duration, now time.Time) []contract.Delivery {
 	var out []contract.Delivery
+	headSeen := map[string]bool{}
 	for _, e := range q.pending {
 		if len(out) >= max {
 			break
 		}
+		key := e.msg.Key
+		if headSeen[key] {
+			continue // exista un mesaj mai vechi nefinalizat cu aceeasi cheie
+		}
+		headSeen[key] = true
 		if e.state != StateReady || now.Before(e.notBefore) {
 			continue
 		}
