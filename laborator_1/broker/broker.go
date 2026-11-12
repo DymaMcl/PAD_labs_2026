@@ -223,10 +223,136 @@ func (b *Broker) reapLocked(now time.Time) {
 			q.stats.Expired++
 			e.lastError = fmt.Sprintf("lease expirat (consumer %s nu a confirmat)", e.consumer)
 			b.events.add(now, q.name, "lease_expired", e.msg.ID, e.msg.Key, fmt.Sprintf("tentativa %d", e.attempts))
+			if e.attempts >= b.cfg.MaxAttempts {
+				b.deadLetterLocked(q, e, now, fmt.Sprintf("lease expirat de %d ori", e.attempts))
+				continue
+			}
 			e.state = StateReady
 			e.notBefore = now
 		}
 	}
+}
+
+// backoff calculeaza intarzierea exponentiala dupa tentativa n (1, 2, 4, 8 ... x base).
+func (b *Broker) backoff(n int) time.Duration {
+	d := b.cfg.BackoffBase
+	for i := 1; i < n && d < b.cfg.BackoffMax; i++ {
+		d *= 2
+	}
+	if d > b.cfg.BackoffMax {
+		d = b.cfg.BackoffMax
+	}
+	return d
+}
+
+func (b *Broker) deadLetterLocked(q *queue, e *entry, now time.Time, reason string) {
+	if e.deliveryID != "" {
+		delete(q.inflight, e.deliveryID)
+		e.deliveryID = ""
+	}
+	q.removePending(e)
+	e.state = StateDead
+	e.deadAt = now
+	e.lastError = reason
+	q.stats.DeadLetters++
+	b.events.add(now, q.name, "dead_lettered", e.msg.ID, e.msg.Key, reason)
+	b.notifyLocked()
+}
+
+// NackResult descrie ce s-a intamplat cu mesajul dupa NACK.
+type NackResult struct {
+	Outcome string    `json:"outcome"` // "retry_scheduled" sau "dead_lettered"
+	RetryAt time.Time `json:"retry_at,omitempty"`
+	Attempt int       `json:"attempt"`
+}
+
+// Nack semnaleaza ca procesarea a esuat. Cu retry=true mesajul este reprogramat
+// cu backoff exponential (pana la MaxAttempts); cu retry=false (eroare
+// permanenta, ex. mesaj "otravit") merge direct in dead-letter queue.
+func (b *Broker) Nack(queueName, deliveryID, reason string, retry bool) (NackResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.cfg.Now()
+	b.reapLocked(now)
+	q := b.queueLocked(queueName)
+	e, ok := q.inflight[deliveryID]
+	if !ok {
+		q.stats.StaleAcks++
+		b.events.add(now, queueName, "stale_ack", "", "", "nack pe delivery "+short(deliveryID))
+		return NackResult{}, ErrStaleDelivery
+	}
+	q.stats.Nacked++
+	if reason == "" {
+		reason = "nack fara motiv"
+	}
+	if !retry || e.attempts >= b.cfg.MaxAttempts {
+		why := reason
+		if retry {
+			why = fmt.Sprintf("%s (epuizat %d/%d tentative)", reason, e.attempts, b.cfg.MaxAttempts)
+		}
+		b.deadLetterLocked(q, e, now, why)
+		return NackResult{Outcome: "dead_lettered", Attempt: e.attempts}, nil
+	}
+	delete(q.inflight, deliveryID)
+	e.deliveryID = ""
+	e.state = StateReady
+	e.lastError = reason
+	e.notBefore = now.Add(b.backoff(e.attempts))
+	b.events.add(now, queueName, "retry_scheduled", e.msg.ID, e.msg.Key,
+		fmt.Sprintf("%s; reincercare peste %s", reason, e.notBefore.Sub(now)))
+	b.notifyLocked()
+	return NackResult{Outcome: "retry_scheduled", RetryAt: e.notBefore, Attempt: e.attempts}, nil
+}
+
+// DeadLetter este un mesaj din DLQ impreuna cu motivul.
+type DeadLetter struct {
+	Message  contract.Message `json:"message"`
+	Attempts int              `json:"attempts"`
+	Reason   string           `json:"reason"`
+	DeadAt   time.Time        `json:"dead_at"`
+}
+
+// DeadLetters listeaza continutul DLQ pentru o coada.
+func (b *Broker) DeadLetters(queueName string) []DeadLetter {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.reapLocked(b.cfg.Now())
+	q := b.queueLocked(queueName)
+	out := []DeadLetter{}
+	for _, e := range q.byID {
+		if e.state == StateDead {
+			out = append(out, DeadLetter{Message: e.msg, Attempts: e.attempts, Reason: e.lastError, DeadAt: e.deadAt})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DeadAt.Before(out[j].DeadAt) })
+	return out
+}
+
+// Replay muta un mesaj din DLQ inapoi in coada (dupa corectarea cauzei),
+// cu contorul de tentative resetat. Mesajul este pus la coada cozii.
+func (b *Broker) Replay(queueName, msgID string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.cfg.Now()
+	q := b.queueLocked(queueName)
+	e, ok := q.byID[msgID]
+	if !ok || e.state != StateDead {
+		return ErrNotFound
+	}
+	b.replayLocked(q, e, now)
+	return nil
+}
+
+func (b *Broker) replayLocked(q *queue, e *entry, now time.Time) {
+	q.nextOffset++
+	e.offset = q.nextOffset
+	e.state = StateReady
+	e.attempts = 0
+	e.notBefore = now
+	e.lastError = ""
+	q.pending = append(q.pending, e)
+	b.events.add(now, q.name, "replayed", e.msg.ID, e.msg.Key, "mutat din DLQ in coada")
+	b.notifyLocked()
 }
 
 // Receive preia pana la max mesaje pentru consumer. Daca nu exista mesaje

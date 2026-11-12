@@ -156,3 +156,93 @@ func TestLongPollWakesOnPublish(t *testing.T) {
 		t.Fatal("long-poll nu s-a trezit la publicare")
 	}
 }
+
+func TestNackRetryWithExponentialBackoff(t *testing.T) {
+	b, clk := newTestBroker()
+	b.Publish("q", msg("A", 1))
+
+	d1 := recv(b, 1)[0]
+	r, err := b.Nack("q", d1.DeliveryID, "db indisponibila", true)
+	if err != nil || r.Outcome != "retry_scheduled" {
+		t.Fatalf("nack 1: %+v %v", r, err)
+	}
+	if len(recv(b, 1)) != 0 {
+		t.Fatal("livrat inainte de expirarea backoff-ului")
+	}
+	clk.Advance(time.Second) // backoff 1: 1s
+	d2 := recv(b, 1)
+	if len(d2) != 1 || d2[0].Attempt != 2 {
+		t.Fatalf("astepta tentativa 2: %+v", d2)
+	}
+	b.Nack("q", d2[0].DeliveryID, "db indisponibila", true)
+	clk.Advance(1500 * time.Millisecond) // backoff 2: 2s -> inca nu
+	if len(recv(b, 1)) != 0 {
+		t.Fatal("backoff-ul nu a crescut exponential")
+	}
+	clk.Advance(500 * time.Millisecond)
+	d3 := recv(b, 1)
+	if len(d3) != 1 || d3[0].Attempt != 3 {
+		t.Fatalf("astepta tentativa 3: %+v", d3)
+	}
+	// a 3-a tentativa = MaxAttempts -> DLQ
+	r, _ = b.Nack("q", d3[0].DeliveryID, "db indisponibila", true)
+	if r.Outcome != "dead_lettered" {
+		t.Fatalf("astepta DLQ dupa MaxAttempts, primit %+v", r)
+	}
+	dl := b.DeadLetters("q")
+	if len(dl) != 1 || dl[0].Attempts != 3 {
+		t.Fatalf("DLQ: %+v", dl)
+	}
+}
+
+func TestPermanentNackGoesStraightToDLQ(t *testing.T) {
+	b, _ := newTestBroker()
+	b.Publish("q", msg("A", 1))
+	d := recv(b, 1)[0]
+	r, _ := b.Nack("q", d.DeliveryID, "suma negativa", false)
+	if r.Outcome != "dead_lettered" || r.Attempt != 1 {
+		t.Fatalf("%+v", r)
+	}
+	if s := b.Stats()[0]; s.Dead != 1 || s.Ready != 0 {
+		t.Fatalf("stats: %+v", s)
+	}
+}
+
+func TestRepeatedLeaseExpiryEndsInDLQ(t *testing.T) {
+	b, clk := newTestBroker()
+	b.Publish("q", msg("A", 1))
+	for i := 0; i < 3; i++ {
+		if len(recv(b, 1)) != 1 {
+			t.Fatalf("tentativa %d nu a fost livrata", i+1)
+		}
+		clk.Advance(11 * time.Second)
+	}
+	if len(recv(b, 1)) != 0 {
+		t.Fatal("mesajul trebuia sa fie in DLQ")
+	}
+	if dl := b.DeadLetters("q"); len(dl) != 1 {
+		t.Fatalf("DLQ: %+v", dl)
+	}
+}
+
+func TestReplayFromDLQ(t *testing.T) {
+	b, _ := newTestBroker()
+	m := msg("A", 1)
+	b.Publish("q", m)
+	d := recv(b, 1)[0]
+	b.Nack("q", d.DeliveryID, "bug in consumer", false)
+	if err := b.Replay("q", m.ID); err != nil {
+		t.Fatal(err)
+	}
+	ds := recv(b, 1)
+	if len(ds) != 1 || ds[0].Attempt != 1 {
+		t.Fatalf("replay: %+v", ds)
+	}
+	if err := b.Replay("q", m.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("replay pe mesaj care nu e in DLQ")
+	}
+	// un mesaj din DLQ ramane in fereastra de deduplicare
+	if res, _ := b.Publish("q", m); res.Status != "duplicate" {
+		t.Fatal("republicarea unui ID cunoscut trebuie ignorata")
+	}
+}
