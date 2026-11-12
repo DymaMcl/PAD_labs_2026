@@ -21,13 +21,13 @@ echo "== 2. producer: 5 alimentari x 100 pe ACC-1 (sold asteptat 500) =="
 
 echo "== 3. consumer: cade dupa al 3-lea efect, fara ACK =="
 set +e
-./bin/consumer -broker "$URL" -name c1 $MODE -crash-after-effect 3
+./bin/consumer -broker "$URL" -name c1 -effect local $MODE -crash-after-effect 3
 echo "   -> consumer iesit cu codul $?"
 set -e
 
 echo "== 4. astept expirarea lease-ului si repornesc consumer-ul =="
 sleep 3.5
-./bin/consumer -broker "$URL" -name c1 $MODE &
+./bin/consumer -broker "$URL" -name c1 -effect local $MODE &
 CONS=$!
 sleep 3
 kill -INT $CONS 2>/dev/null || true

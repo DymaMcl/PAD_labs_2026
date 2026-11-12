@@ -20,15 +20,15 @@ try {
   .\bin\producer.exe -broker $url -count 5 -accounts 1 -interval 0 | Select-Object -Last 4
 
   Write-Host "== 3. consumer: cade dupa al 3-lea efect, fara ACK =="
-  .\bin\consumer.exe -broker $url -name c1 @mode -crash-after-effect 3
+  .\bin\consumer.exe -broker $url -name c1 -effect local @mode -crash-after-effect 3
   Write-Host "   -> consumer iesit cu codul $LASTEXITCODE"
 
   Write-Host "== 4. astept expirarea lease-ului si repornesc consumer-ul =="
   Start-Sleep -Milliseconds 3500
-  $c = Start-Process -FilePath .\bin\consumer.exe -ArgumentList (@("-broker", $url, "-name", "c1") + $mode) -NoNewWindow -PassThru
+  $c = Start-Process -FilePath .\bin\consumer.exe -ArgumentList (@("-broker", $url, "-name", "c1", "-effect", "local") + $mode) -NoNewWindow -PassThru
   Start-Sleep -Seconds 3
   Stop-Process -Id $c.Id
-  .\bin\consumer.exe -name c1 -show
+  Get-Content data\c1.ledger.json
 
   Write-Host "== 5. starea brokerului =="
   (Invoke-WebRequest "$url/v1/queues" -UseBasicParsing).Content
