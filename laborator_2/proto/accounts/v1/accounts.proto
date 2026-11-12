@@ -1,0 +1,86 @@
+// Contractul serviciului de conturi, versiunea 1.
+//
+// Reguli de evolutie (vezi CONTRACT.md):
+//   * in cadrul v1 se pot doar ADAUGA campuri noi, cu numere noi;
+//   * numerele si numele campurilor eliminate se trec in `reserved`;
+//   * orice schimbare incompatibila (tip, semantica, camp obligatoriu nou)
+//     se face intr-un pachet nou: accounts.v2.
+syntax = "proto3";
+
+package accounts.v1;
+
+option go_package = "github.com/DymaMcl/PAD_labs_2026/laborator_2/gen/accounts/v1;accountsv1";
+
+// Accounts gestioneaza soldurile conturilor (o singura moneda: MDL, in bani).
+service Accounts {
+  // Credit alimenteaza un cont. Este IDEMPOTENT dupa idempotency_key:
+  // aceeasi cheie cu aceeasi cerere intoarce rezultatul initial (replayed=true)
+  // fara a executa operatia din nou. Aceeasi cheie cu alta cerere -> ALREADY_EXISTS.
+  rpc Credit(CreditRequest) returns (CreditResponse);
+
+  // GetOperation intoarce starea unei operatii dupa cheia de idempotenta.
+  // Este calea prin care un client rezolva un rezultat AMBIGUU (raspuns pierdut).
+  rpc GetOperation(GetOperationRequest) returns (Operation);
+
+  // GetBalance intoarce soldul curent (operatie de citire, fara efecte).
+  rpc GetBalance(GetBalanceRequest) returns (Balance);
+}
+
+message CreditRequest {
+  // Obligatoriu, 1..128 caractere. Clientul il genereaza O SINGURA DATA per
+  // operatie logica si il refoloseste la fiecare reincercare.
+  string idempotency_key = 1;
+  // Obligatoriu, ex. "ACC-1".
+  string account = 2;
+  // Obligatoriu, > 0, in unitati minore (bani).
+  int64 amount = 3;
+  // Adaugat in v1.1 (camp optional nou: compatibil in ambele directii).
+  string note = 4;
+
+  // Camp eliminat in v1.1; numarul si numele nu se mai refolosesc niciodata.
+  reserved 5;
+  reserved "currency";
+}
+
+message CreditResponse {
+  string operation_id = 1;
+  int64 balance_after = 2;
+  // true daca raspunsul provine din registrul de idempotenta (operatia a fost
+  // executata la o cerere anterioara cu aceeasi cheie).
+  bool replayed = 3;
+  int64 applied_at_unix_ms = 4;
+}
+
+message GetOperationRequest {
+  string idempotency_key = 1;
+}
+
+message Operation {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    // Serviciul nu are nicio operatie cu aceasta cheie: NU a fost executata
+    // (sau cererea nu a ajuns). Clientul poate retrimite in siguranta.
+    STATUS_NOT_FOUND = 1;
+    // In curs de executie (o alta cerere cu aceeasi cheie). Reintrebati.
+    STATUS_IN_PROGRESS = 2;
+    // Executata; `result` contine raspunsul original.
+    STATUS_SUCCEEDED = 3;
+    // Respinsa definitiv (eroare de business); `error` contine motivul.
+    STATUS_FAILED = 4;
+  }
+  string idempotency_key = 1;
+  Status status = 2;
+  CreditResponse result = 3;
+  string error = 4;
+}
+
+message GetBalanceRequest {
+  string account = 1;
+}
+
+message Balance {
+  string account = 1;
+  int64 amount = 2;
+  // Numarul de operatii aplicate contului (creste monoton).
+  int64 version = 3;
+}

@@ -1,0 +1,21 @@
+// Fotografia contractului accounts.v1 in versiunea INITIALA 1.0 (inainte de
+// adaugarea campului `note` si de eliminarea campului `currency`).
+// Folosita doar de testele de compatibilitate: un client "vechi" compilat cu
+// acest contract trebuie sa poata vorbi cu serverul actual si invers.
+syntax = "proto3";
+
+package compat.v1_0;
+
+option go_package = "github.com/DymaMcl/PAD_labs_2026/laborator_2/gen/compat;compat";
+
+message CreditRequest {
+  string idempotency_key = 1;
+  string account = 2;
+  int64 amount = 3;
+  string currency = 5; // existent in 1.0, eliminat in 1.1 (acum reserved)
+}
+
+message CreditResponse {
+  string operation_id = 1;
+  int64 balance_after = 2;
+}

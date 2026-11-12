@@ -1,0 +1,71 @@
+// Contractul serviciului de conturi, versiunea 2.
+//
+// De ce un pachet nou si nu doar campuri noi in v1? Suma devine un obiect
+// Money (valoare + moneda) in loc de int64. Schimbarea tipului unui camp
+// existent NU este compatibila pe fir, deci cere o versiune majora noua.
+// Serverul serveste v1 si v2 simultan, peste aceeasi stare.
+syntax = "proto3";
+
+package accounts.v2;
+
+option go_package = "github.com/DymaMcl/PAD_labs_2026/laborator_2/gen/accounts/v2;accountsv2";
+
+service Accounts {
+  rpc Credit(CreditRequest) returns (CreditResponse);
+  rpc GetOperation(GetOperationRequest) returns (Operation);
+  rpc GetBalance(GetBalanceRequest) returns (Balance);
+}
+
+// Money: suma in unitati minore + codul ISO 4217 al monedei.
+message Money {
+  int64 amount_minor = 1;
+  string currency = 2;
+}
+
+message CreditRequest {
+  string idempotency_key = 1;
+  string account = 2;
+  Money amount = 3;
+  // Referinta de business (ex. ID-ul mesajului sursa), apare in operatie.
+  string reference = 4;
+  map<string, string> metadata = 5;
+}
+
+enum OperationStatus {
+  OPERATION_STATUS_UNSPECIFIED = 0;
+  OPERATION_STATUS_NOT_FOUND = 1;
+  OPERATION_STATUS_IN_PROGRESS = 2;
+  OPERATION_STATUS_SUCCEEDED = 3;
+  OPERATION_STATUS_FAILED = 4;
+}
+
+message Operation {
+  string id = 1;
+  string idempotency_key = 2;
+  OperationStatus status = 3;
+  string account = 4;
+  Money amount = 5;
+  Money balance_after = 6;
+  int64 applied_at_unix_ms = 7;
+  bool replayed = 8;
+  string failure_reason = 9;
+  string reference = 10;
+}
+
+message CreditResponse {
+  Operation operation = 1;
+}
+
+message GetOperationRequest {
+  string idempotency_key = 1;
+}
+
+message GetBalanceRequest {
+  string account = 1;
+}
+
+message Balance {
+  string account = 1;
+  Money amount = 2;
+  int64 version = 3;
+}
