@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Scenariul critic cu procese reale: consumer-ul cade (exit 3) dupa efect,
 # inainte de ACK, este repornit, iar mesajul relivrat nu dubleaza efectul.
-# Utilizare: ./scripts/scenariu_critic.sh [--naive]
+# Utilizare: ./scripts/scenariu_critic.sh [-naive]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 MODE="${1:-}"
