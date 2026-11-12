@@ -545,3 +545,14 @@ func short(id string) string {
 	}
 	return id
 }
+
+// PublicConfig expune parametrii relevanti pentru clienti si dashboard.
+func (b *Broker) PublicConfig() map[string]any {
+	return map[string]any{
+		"max_attempts":     b.cfg.MaxAttempts,
+		"default_lease_ms": b.cfg.DefaultLease.Milliseconds(),
+		"backoff_base_ms":  b.cfg.BackoffBase.Milliseconds(),
+		"backoff_max_ms":   b.cfg.BackoffMax.Milliseconds(),
+		"persistent":       b.j != nil,
+	}
+}
