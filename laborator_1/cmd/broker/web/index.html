@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Registru de livrări · Laborator 1</title>
+<style>
+  :root{
+    --paper:#f6f1e7; --sheet:#fffdf8; --ink:#1d2433; --muted:#6b6457; --rule:#d9cfbd;
+    --blue:#24479a; --red:#c0392b; --green:#2f7d4f; --amber:#b7791f; --violet:#6b3fa0;
+    --mono: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+    --serif: Georgia, "Times New Roman", serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--serif)}
+  .wrap{max-width:1240px;margin:0 auto;padding:28px 24px 60px}
+  header.mast{display:flex;align-items:flex-end;justify-content:space-between;border-bottom:3px double var(--ink);padding-bottom:10px;margin-bottom:22px}
+  .mast h1{font-size:30px;margin:0;letter-spacing:.5px;font-weight:normal}
+  .mast h1 em{color:var(--red);font-style:italic}
+  .mast .sub{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .live{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green);margin-right:6px;vertical-align:middle}
+  .live.off{background:var(--red)}
+  .grid{display:grid;grid-template-columns:1.25fr 1fr;gap:22px}
+  @media (max-width:980px){.grid{grid-template-columns:1fr}}
+  section.card{background:var(--sheet);border:1px solid var(--rule);box-shadow:3px 3px 0 var(--rule);padding:16px 18px;margin-bottom:22px}
+  section.card h2{font-size:13px;letter-spacing:2px;text-transform:uppercase;margin:0 0 12px;color:var(--muted);font-weight:normal;border-bottom:1px solid var(--rule);padding-bottom:6px}
+  .queue{margin-bottom:16px}
+  .queue .name{font-size:20px}
+  .bar{display:flex;height:14px;border:1px solid var(--ink);margin:8px 0 6px;background:#fff}
+  .bar span{display:block;height:100%}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;font-family:var(--mono);font-size:12px}
+  .sw{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px;border:1px solid var(--ink)}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+  th{text-align:left;font-weight:normal;color:var(--muted);border-bottom:1px solid var(--ink);padding:4px 6px}
+  td{border-bottom:1px dotted var(--rule);padding:4px 6px;vertical-align:top}
+  .counters td:nth-child(2n){text-align:right;font-weight:bold}
+  .k{padding:1px 6px;border:1px solid currentColor;border-radius:2px;font-size:11px;white-space:nowrap}
+  .k-published{color:var(--blue)} .k-acked{color:var(--green)} .k-delivered{color:var(--ink)}
+  .k-redelivered,.k-lease_expired,.k-retry_scheduled{color:var(--amber)}
+  .k-dead_lettered,.k-rejected,.k-stale_ack{color:var(--red)} .k-duplicate,.k-replayed,.k-recovered{color:var(--violet)}
+  .events{max-height:430px;overflow:auto}
+  label{font-family:var(--mono);font-size:12px;color:var(--muted);display:block;margin-bottom:3px}
+  input,select{font-family:var(--mono);font-size:13px;padding:5px 7px;border:1px solid var(--ink);background:#fff;width:100%}
+  .row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px}
+  button{font-family:var(--serif);font-size:14px;padding:6px 12px;border:1px solid var(--ink);background:var(--sheet);cursor:pointer;box-shadow:2px 2px 0 var(--ink)}
+  button:active{transform:translate(2px,2px);box-shadow:none}
+  button.primary{background:var(--ink);color:var(--sheet)}
+  button.ok{border-color:var(--green);color:var(--green);box-shadow:2px 2px 0 var(--green)}
+  button.warn{border-color:var(--amber);color:var(--amber);box-shadow:2px 2px 0 var(--amber)}
+  button.bad{border-color:var(--red);color:var(--red);box-shadow:2px 2px 0 var(--red)}
+  .note{font-size:13px;color:var(--muted);margin:6px 0 10px;font-style:italic}
+  .delivery{border:1px dashed var(--ink);padding:10px;margin-top:10px;background:#fffaf0}
+  .delivery .meta{font-family:var(--mono);font-size:12px;margin-bottom:8px}
+  .actions{display:flex;flex-wrap:wrap;gap:8px}
+  .lease{font-family:var(--mono);font-size:12px}
+  .flash{font-family:var(--mono);font-size:12px;margin-top:8px;min-height:18px}
+  .empty{color:var(--muted);font-style:italic}
+  .cfg{font-family:var(--mono);font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="mast">
+    <div>
+      <h1>Registru de livrări <em>— producer · broker · consumer</em></h1>
+      <div class="sub">Laborator 1 · comunicare fiabilă: ACK/NACK, retry, deduplicare, ordonare, DLQ</div>
+    </div>
+    <div class="sub"><span id="live" class="live"></span><span id="clock">—</span></div>
+  </header>
+
+  <div class="grid">
+    <div>
+      <section class="card">
+        <h2>Cozi</h2>
+        <div id="queues"><p class="empty">Nicio coadă încă. Publică un mesaj mai jos.</p></div>
+        <div class="cfg" id="cfg"></div>
+      </section>
+
+      <section class="card">
+        <h2>Producer manual</h2>
+        <div class="row">
+          <div><label>coadă</label><input id="pq" value="plati"></div>
+          <div><label>cont (cheie)</label><input id="pacc" value="ACC-1"></div>
+          <div><label>sumă</label><input id="pamt" type="number" value="100"></div>
+          <div><label>nr. mesaje</label><input id="pcnt" type="number" value="1" min="1" max="100"></div>
+        </div>
+        <div class="actions">
+          <button class="primary" onclick="publish(false)">Publică</button>
+          <button onclick="publish(true)">Publică de 2× același ID</button>
+          <button class="bad" onclick="publishInvalid()">Trimite mesaj invalid</button>
+        </div>
+        <div class="flash" id="pflash"></div>
+      </section>
+
+      <section class="card">
+        <h2>Consumer manual — reproduce scenariul critic</h2>
+        <p class="note">Preia un mesaj și decide tu: confirmă, cere reîncercare, trimite în DLQ — sau „cazi” (nu faci nimic) și urmărește cum, după expirarea lease-ului, mesajul este relivrat cu <code>attempt</code> mărit, iar ACK-ul vechi este respins.</p>
+        <div class="row">
+          <div><label>coadă</label><input id="cq" value="plati"></div>
+          <div><label>consumer</label><input id="cname" value="manual"></div>
+          <div><label>lease (ms)</label><input id="clease" type="number" value="8000"></div>
+          <div style="display:flex;align-items:flex-end"><button class="primary" onclick="receive()" style="width:100%">Preia mesaj</button></div>
+        </div>
+        <div id="deliveries"></div>
+        <div class="flash" id="cflash"></div>
+      </section>
+
+      <section class="card">
+        <h2>Dead-letter queue</h2>
+        <div id="dlq"><p class="empty">Gol.</p></div>
+      </section>
+    </div>
+
+    <div>
+      <section class="card">
+        <h2>Injectare de defecte</h2>
+        <label>probabilitatea de a pierde ACK-ul către producer: <b id="dropv">0%</b></label>
+        <input id="drop" type="range" min="0" max="100" value="0" oninput="setDrop(this.value)">
+        <p class="note">Mesajul este persistat, dar răspunsul 201 este înlocuit cu 503. Producer-ul retrimite același ID, iar brokerul îl marchează ca <span class="k k-duplicate">duplicate</span>.</p>
+      </section>
+
+      <section class="card">
+        <h2>Jurnal de evenimente</h2>
+        <div class="events">
+          <table><thead><tr><th>ora</th><th>eveniment</th><th>mesaj</th><th>detalii</th></tr></thead>
+          <tbody id="events"></tbody></table>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+const source = "dashboard-" + Math.random().toString(16).slice(2, 8);
+const seqs = {};
+let lastEvent = 0;
+const held = new Map(); // deliveryID -> delivery (consumer manual)
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() :
+  "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => { const r = Math.random()*16|0; return (c=="x"?r:(r&3|8)).toString(16); }));
+const hhmmss = t => new Date(t).toLocaleTimeString("ro-RO", {hour12:false}) + "." + String(new Date(t).getMilliseconds()).padStart(3,"0");
+
+async function api(method, path, body) {
+  const r = await fetch(path, {method, headers: {"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined});
+  let data = {};
+  try { data = await r.json(); } catch (_) {}
+  return {code: r.status, data};
+}
+
+function makeMsg(acc, amount) {
+  seqs[acc] = (seqs[acc] || 0) + 1;
+  return {id: uuid(), type: "payment.credit", version: 1, source, key: acc, seq: seqs[acc],
+          created_at: new Date().toISOString(), payload: {account: acc, amount: Number(amount), note: "din dashboard"}};
+}
+
+async function publish(twice) {
+  const q = $("pq").value, acc = $("pacc").value, amt = $("pamt").value, n = Math.max(1, +$("pcnt").value);
+  const lines = [];
+  for (let i = 0; i < n; i++) {
+    const m = makeMsg(acc, amt);
+    for (let k = 0; k < (twice ? 2 : 1); k++) {
+      const r = await api("POST", `/v1/queues/${encodeURIComponent(q)}/messages`, m);
+      lines.push(`${m.id.slice(0,8)} seq=${m.seq} → ${r.code} ${r.data.status || r.data.error || ""}`);
+    }
+  }
+  $("pflash").textContent = lines.slice(-4).join("   ·   ");
+  refresh();
+}
+
+async function publishInvalid() {
+  const r = await api("POST", `/v1/queues/${encodeURIComponent($("pq").value)}/messages`,
+    {id: uuid(), version: 3, payload: [1, 2]});
+  $("pflash").textContent = `${r.code} ${r.data.error}: ${r.data.detail}`;
+  refresh();
+}
+
+async function receive() {
+  const q = $("cq").value;
+  const r = await api("POST", `/v1/queues/${encodeURIComponent(q)}/receive`,
+    {consumer: $("cname").value, max: 1, lease_ms: +$("clease").value, wait_ms: 0});
+  const ds = r.data.deliveries || [];
+  if (!ds.length) { $("cflash").textContent = "Nimic disponibil (coadă goală, mesaje în backoff sau cheie blocată de ordonare)."; return; }
+  ds.forEach(d => held.set(d.delivery_id, d));
+  $("cflash").textContent = "";
+  renderHeld();
+  refresh();
+}
+
+async function settle(did, action) {
+  const d = held.get(did);
+  if (!d) return;
+  let r;
+  if (action === "ack") r = await api("POST", `/v1/queues/${encodeURIComponent(d.queue)}/ack`, {delivery_id: did});
+  else r = await api("POST", `/v1/queues/${encodeURIComponent(d.queue)}/nack`,
+          {delivery_id: did, retry: action === "retry", reason: action === "retry" ? "manual: eroare tranzitorie" : "manual: mesaj otrăvit"});
+  const txt = r.code === 409 ? "409 — livrare expirată: brokerul a respins confirmarea (mesajul va fi/ a fost relivrat)"
+                             : `${r.code} ${r.data.status || r.data.outcome || r.data.error || ""}`;
+  $("cflash").textContent = `${action.toUpperCase()} ${d.message.id.slice(0,8)} try=${d.attempt}: ${txt}`;
+  held.delete(did);
+  renderHeld();
+  refresh();
+}
+
+function renderHeld() {
+  const now = Date.now();
+  $("deliveries").innerHTML = [...held.values()].map(d => {
+    const left = Math.max(0, new Date(d.lease_until) - now);
+    return `<div class="delivery">
+      <div class="meta">${esc(d.message.id.slice(0,8))} · cheie <b>${esc(d.message.key)}</b> · seq ${d.message.seq} ·
+        <b>attempt ${d.attempt}</b> · payload ${esc(JSON.stringify(d.message.payload))}</div>
+      <div class="lease">lease: ${left ? (left/1000).toFixed(1) + " s rămase" : "<b style='color:var(--red)'>EXPIRAT</b> — ACK-ul va fi respins"}</div>
+      <div class="actions" style="margin-top:8px">
+        <button class="ok" onclick="settle('${d.delivery_id}','ack')">ACK</button>
+        <button class="warn" onclick="settle('${d.delivery_id}','retry')">NACK + retry</button>
+        <button class="bad" onclick="settle('${d.delivery_id}','dlq')">NACK → DLQ</button>
+        <button onclick="held.delete('${d.delivery_id}');renderHeld()">Abandonează (cădere)</button>
+      </div></div>`;
+  }).join("");
+}
+
+async function setDrop(v) {
+  $("dropv").textContent = v + "%";
+  await api("PUT", "/v1/admin/faults", {drop_publish_ack: v / 100});
+}
+
+async function replay(q, id) {
+  await api("POST", `/v1/queues/${encodeURIComponent(q)}/dlq/${encodeURIComponent(id)}/replay`);
+  refresh();
+}
+
+const LABELS = {published:"publicări", duplicates:"duplicate", rejected:"respinse", delivered:"livrări",
+  redelivered:"relivrări", acked:"ACK", nacked:"NACK", lease_expired:"lease expirat", dead_lettered:"în DLQ", stale_acks:"ACK respinse"};
+
+async function refresh() {
+  try {
+    const st = await api("GET", "/v1/queues");
+    $("live").className = "live";
+    $("clock").textContent = new Date().toLocaleTimeString("ro-RO", {hour12:false});
+    const qs = st.data.queues || [];
+    const c = st.data.config || {};
+    $("cfg").textContent = `max_attempts=${c.max_attempts} · lease implicit=${c.default_lease_ms}ms · backoff=${c.backoff_base_ms}..${c.backoff_max_ms}ms · persistent=${c.persistent}`;
+    if (qs.length) {
+      $("queues").innerHTML = qs.map(q => {
+        const tot = Math.max(1, q.ready + q.delayed + q.in_flight + q.dead);
+        const seg = (n, col) => n ? `<span style="width:${100*n/tot}%;background:${col}"></span>` : "";
+        const cnt = Object.entries(LABELS).map(([k, l]) => `<td>${l}</td><td>${q.counters[k]}</td>`);
+        const rows = []; for (let i = 0; i < cnt.length; i += 5) rows.push(`<tr>${cnt.slice(i, i+5).join("")}</tr>`);
+        return `<div class="queue"><span class="name">${esc(q.name)}</span>
+          <div class="bar">${seg(q.ready,"#24479a")}${seg(q.delayed,"#e0b25a")}${seg(q.in_flight,"#2f7d4f")}${seg(q.dead,"#c0392b")}</div>
+          <div class="legend"><span><i class="sw" style="background:#24479a"></i>gata ${q.ready}</span>
+            <span><i class="sw" style="background:#e0b25a"></i>în backoff ${q.delayed}</span>
+            <span><i class="sw" style="background:#2f7d4f"></i>în zbor ${q.in_flight}</span>
+            <span><i class="sw" style="background:#c0392b"></i>DLQ ${q.dead}</span></div>
+          <table class="counters" style="margin-top:8px">${rows.join("")}</table></div>`;
+      }).join("");
+      const dl = [];
+      for (const q of qs) {
+        if (!q.dead) continue;
+        const r = await api("GET", `/v1/queues/${encodeURIComponent(q.name)}/dlq`);
+        for (const d of r.data.dead_letters || []) dl.push({q: q.name, ...d});
+      }
+      $("dlq").innerHTML = dl.length ? `<table><thead><tr><th>coadă</th><th>mesaj</th><th>cheie/seq</th><th>tent.</th><th>motiv</th><th></th></tr></thead><tbody>` +
+        dl.map(d => `<tr><td>${esc(d.q)}</td><td>${esc(d.message.id.slice(0,8))}</td><td>${esc(d.message.key)}/${d.message.seq}</td>
+          <td>${d.attempts}</td><td>${esc(d.reason)}</td><td><button onclick="replay('${esc(d.q)}','${esc(d.message.id)}')">Replay</button></td></tr>`).join("") +
+        `</tbody></table>` : `<p class="empty">Gol.</p>`;
+    }
+    const ev = await api("GET", `/v1/events?since=${lastEvent}`);
+    const rows = (ev.data.events || []).map(e => {
+      lastEvent = Math.max(lastEvent, e.n);
+      return `<tr><td>${hhmmss(e.at)}</td><td><span class="k k-${e.kind}">${e.kind}</span></td>
+        <td>${esc((e.msg_id || "").slice(0,8))} ${esc(e.key || "")}</td><td>${esc(e.detail)}</td></tr>`;
+    });
+    if (rows.length) {
+      const tb = $("events");
+      tb.insertAdjacentHTML("afterbegin", rows.reverse().join(""));
+      while (tb.children.length > 300) tb.lastChild.remove();
+    }
+  } catch (e) {
+    $("live").className = "live off";
+    $("clock").textContent = "broker indisponibil";
+  }
+}
+
+(async () => {
+  const f = await api("GET", "/v1/admin/faults");
+  const v = Math.round((f.data.drop_publish_ack || 0) * 100);
+  $("drop").value = v; $("dropv").textContent = v + "%";
+})();
+refresh();
+setInterval(refresh, 1000);
+setInterval(renderHeld, 250);
+</script>
+</body>
+</html>
