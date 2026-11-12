@@ -1,8 +1,9 @@
-// Comanda demo ruleaza scenariile laboratorului cap-coada, intr-un singur
+// Comanda demo ruleaza scenariile laboratoarelor 1 si 2 cap-coada, intr-un singur
 // proces (broker HTTP real pe un port local + producer + consumeri).
 //
-//	go run ./cmd/demo              # toate scenariile
-//	go run ./cmd/demo -s critic    # doar scenariul critic
+//	go run ./cmd/demo                  # scenariile laboratorului 2
+//	go run ./cmd/demo -s lab1          # scenariile laboratorului 1
+//	go run ./cmd/demo -s rpc-critic    # doar scenariul critic al lab. 2
 package main
 
 import (
@@ -27,27 +28,38 @@ import (
 var verbose = flag.Bool("v", true, "afiseaza jurnalul consumerilor")
 
 func main() {
-	scenario := flag.String("s", "all", "scenariu: critic | producer | retry | ordering | all")
+	scenario := flag.String("s", "lab2", "scenariu sau grup: lab2 | lab1 | toate | "+
+		"rpc-critic | ambiguitate | versiuni | deadline | lant | critic | producer | retry | ordering")
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
 	run := map[string]func(){
+		// laboratorul 1
 		"critic":   scenarioCritical,
 		"producer": scenarioProducerRetry,
 		"retry":    scenarioRetryDLQ,
 		"ordering": scenarioOrdering,
+		// laboratorul 2
+		"rpc-critic":  scenarioRPCCritical,
+		"ambiguitate": scenarioAmbiguity,
+		"versiuni":    scenarioVersions,
+		"deadline":    scenarioDeadlines,
+		"lant":        scenarioPipeline,
 	}
-	order := []string{"critic", "producer", "retry", "ordering"}
-	if *scenario != "all" {
-		f, ok := run[*scenario]
-		if !ok {
+	groups := map[string][]string{
+		"lab1":  {"critic", "producer", "retry", "ordering"},
+		"lab2":  {"rpc-critic", "ambiguitate", "versiuni", "deadline", "lant"},
+		"toate": {"critic", "producer", "retry", "ordering", "rpc-critic", "ambiguitate", "versiuni", "deadline", "lant"},
+	}
+	names, ok := groups[*scenario]
+	if !ok {
+		if _, ok := run[*scenario]; !ok {
 			log.Fatalf("scenariu necunoscut %q", *scenario)
 		}
-		f()
-		return
+		names = []string{*scenario}
 	}
-	for _, name := range order {
-		run[name]()
+	for _, n := range names {
+		run[n]()
 	}
 }
 
