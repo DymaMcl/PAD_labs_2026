@@ -110,6 +110,7 @@ type Broker struct {
 	queues  map[string]*queue
 	changed chan struct{} // inchis si recreat la orice schimbare (long-poll)
 	events  *eventLog
+	j       *journal // nil pentru brokerul pur in memorie
 }
 
 // New creeaza un broker in memorie.
@@ -184,6 +185,10 @@ func (b *Broker) Publish(queueName string, m contract.Message) (PublishResult, e
 		return PublishResult{}, fmt.Errorf("%w: primit %d, ultimul %d", ErrStaleSequence, m.Seq, last)
 	}
 
+	// write-ahead: mesajul ajunge in jurnal inainte de ACK-ul catre producer
+	if err := b.logLocked(record{Op: "publish", Q: queueName, ID: m.ID, Msg: &m, At: now}); err != nil {
+		return PublishResult{}, fmt.Errorf("persistare esuata: %w", err)
+	}
 	e := b.acceptLocked(q, m, now)
 	b.events.add(now, queueName, "published", m.ID, m.Key, fmt.Sprintf("offset=%d seq=%d", e.offset, m.Seq))
 	b.notifyLocked()
@@ -196,7 +201,9 @@ func (b *Broker) acceptLocked(q *queue, m contract.Message, now time.Time) *entr
 	q.pending = append(q.pending, e)
 	q.byID[m.ID] = e
 	q.seen[m.ID] = now
-	q.lastSeq[seqKey(m)] = m.Seq
+	if m.Seq > q.lastSeq[seqKey(m)] {
+		q.lastSeq[seqKey(m)] = m.Seq
+	}
 	q.stats.Published++
 	return e
 }
@@ -250,6 +257,7 @@ func (b *Broker) deadLetterLocked(q *queue, e *entry, now time.Time, reason stri
 		delete(q.inflight, e.deliveryID)
 		e.deliveryID = ""
 	}
+	_ = b.logLocked(record{Op: "dead", Q: q.name, ID: e.msg.ID, Reason: reason, At: now})
 	q.removePending(e)
 	e.state = StateDead
 	e.deadAt = now
@@ -293,11 +301,15 @@ func (b *Broker) Nack(queueName, deliveryID, reason string, retry bool) (NackRes
 		b.deadLetterLocked(q, e, now, why)
 		return NackResult{Outcome: "dead_lettered", Attempt: e.attempts}, nil
 	}
+	retryAt := now.Add(b.backoff(e.attempts))
+	if err := b.logLocked(record{Op: "nack", Q: queueName, ID: e.msg.ID, Reason: reason, NotBefore: &retryAt, At: now}); err != nil {
+		return NackResult{}, fmt.Errorf("persistare esuata: %w", err)
+	}
 	delete(q.inflight, deliveryID)
 	e.deliveryID = ""
 	e.state = StateReady
 	e.lastError = reason
-	e.notBefore = now.Add(b.backoff(e.attempts))
+	e.notBefore = retryAt
 	b.events.add(now, queueName, "retry_scheduled", e.msg.ID, e.msg.Key,
 		fmt.Sprintf("%s; reincercare peste %s", reason, e.notBefore.Sub(now)))
 	b.notifyLocked()
@@ -344,6 +356,7 @@ func (b *Broker) Replay(queueName, msgID string) error {
 }
 
 func (b *Broker) replayLocked(q *queue, e *entry, now time.Time) {
+	_ = b.logLocked(record{Op: "replay", Q: q.name, ID: e.msg.ID, At: now})
 	q.nextOffset++
 	e.offset = q.nextOffset
 	e.state = StateReady
@@ -427,6 +440,7 @@ func (b *Broker) takeLocked(q *queue, consumer string, max int, lease time.Durat
 
 func (b *Broker) deliverLocked(q *queue, e *entry, consumer string, lease time.Duration, now time.Time) contract.Delivery {
 	e.attempts++
+	_ = b.logLocked(record{Op: "attempt", Q: q.name, ID: e.msg.ID, Attempt: e.attempts, At: now})
 	e.state = StateInFlight
 	e.deliveryID = contract.NewID()
 	e.leaseUntil = now.Add(lease)
@@ -469,6 +483,9 @@ func (b *Broker) Ack(queueName, deliveryID string) error {
 		q.stats.StaleAcks++
 		b.events.add(now, queueName, "stale_ack", "", "", "delivery "+short(deliveryID))
 		return ErrStaleDelivery
+	}
+	if err := b.logLocked(record{Op: "ack", Q: queueName, ID: e.msg.ID, At: now}); err != nil {
+		return fmt.Errorf("persistare esuata: %w", err)
 	}
 	delete(q.inflight, deliveryID)
 	q.removePending(e)
