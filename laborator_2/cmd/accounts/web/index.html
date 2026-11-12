@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Serviciul de conturi · Laborator 2</title>
+<style>
+  :root{--paper:#f6f1e7;--sheet:#fffdf8;--ink:#1d2433;--muted:#6b6457;--rule:#d9cfbd;
+    --blue:#24479a;--red:#c0392b;--green:#2f7d4f;--amber:#b7791f;--violet:#6b3fa0;
+    --mono:"JetBrains Mono","Cascadia Code",Consolas,"Courier New",monospace;--serif:Georgia,"Times New Roman",serif}
+  *{box-sizing:border-box} body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--serif)}
+  .wrap{max-width:1240px;margin:0 auto;padding:28px 24px 60px}
+  header{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px double var(--ink);padding-bottom:10px;margin-bottom:22px}
+  h1{font-size:30px;margin:0;font-weight:normal} h1 em{color:var(--blue)}
+  .sub{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .grid{display:grid;grid-template-columns:1fr 1.6fr;gap:22px} @media(max-width:980px){.grid{grid-template-columns:1fr}}
+  section{background:var(--sheet);border:1px solid var(--rule);box-shadow:3px 3px 0 var(--rule);padding:16px 18px;margin-bottom:22px}
+  h2{font-size:13px;letter-spacing:2px;text-transform:uppercase;margin:0 0 12px;color:var(--muted);font-weight:normal;border-bottom:1px solid var(--rule);padding-bottom:6px}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+  th{text-align:left;font-weight:normal;color:var(--muted);border-bottom:1px solid var(--ink);padding:4px 6px}
+  td{border-bottom:1px dotted var(--rule);padding:4px 6px}
+  .num{text-align:right;font-weight:bold}
+  .k{padding:1px 6px;border:1px solid currentColor;border-radius:2px;font-size:11px}
+  .SUCCEEDED{color:var(--green)} .FAILED{color:var(--red)} .v1{color:var(--amber)} .v2{color:var(--violet)}
+  label{font-family:var(--mono);font-size:12px;color:var(--muted);display:block;margin-bottom:3px}
+  input{font-family:var(--mono);font-size:13px;padding:5px 7px;border:1px solid var(--ink);background:#fff;width:100%}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+  button{font-family:var(--serif);font-size:14px;padding:6px 12px;border:1px solid var(--ink);background:var(--ink);color:var(--sheet);cursor:pointer;box-shadow:2px 2px 0 var(--rule)}
+  .note{font-size:13px;color:var(--muted);font-style:italic;margin:4px 0 10px}
+  .big{font-size:26px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div><h1>Serviciul de conturi <em>— accounts.v1 · accounts.v2</em></h1>
+    <div class="sub">Laborator 2 · RPC, contracte și integrare · gRPC :7080</div></div>
+    <div class="sub" id="clock">—</div>
+  </header>
+  <div class="grid">
+    <div>
+      <section><h2>Solduri</h2><table><thead><tr><th>cont</th><th class="num">sold (bani)</th></tr></thead><tbody id="bal"></tbody></table></section>
+      <section><h2>Contoare</h2><table><tbody id="stats"></tbody></table></section>
+      <section>
+        <h2>Injectare de defecte</h2>
+        <p class="note">„Răspuns pierdut” = operația ESTE executată și salvată, dar clientul primește UNAVAILABLE — scenariul critic.</p>
+        <div class="row">
+          <div><label>pierde următoarele N răspunsuri</label><input id="drop_next" type="number" min="0" value="0"></div>
+          <div><label>probabilitate pierdere (0..1)</label><input id="drop_rate" type="number" min="0" max="1" step="0.1" value="0"></div>
+          <div><label>întârziere după commit (ms)</label><input id="slow" type="number" min="0" value="0"></div>
+          <div><label>UNAVAILABLE înainte de execuție (N)</label><input id="unav" type="number" min="0" value="0"></div>
+        </div>
+        <button onclick="setFaults()">Aplică</button> <span class="sub" id="fmsg"></span>
+      </section>
+    </div>
+    <div>
+      <section>
+        <h2>Registrul de idempotență (ultimele operații)</h2>
+        <table><thead><tr><th>operație</th><th>cheie</th><th>cont</th><th class="num">sumă</th><th class="num">sold după</th><th>stare</th><th>api</th><th>ora</th></tr></thead>
+        <tbody id="ops"></tbody></table>
+      </section>
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const LABELS = {executed:"executate",replayed:"reluate din registru",rejected:"respinse (business)",
+  cancelled_before_commit:"anulate înainte de commit",deadline_fail_fast:"respinse: deadline prea scurt",
+  responses_dropped:"răspunsuri pierdute (defect)",unavailable_injected:"UNAVAILABLE injectate"};
+let loaded = false;
+async function refresh(){
+  try{
+    const s = await (await fetch("/admin/state")).json();
+    $("clock").textContent = new Date().toLocaleTimeString("ro-RO",{hour12:false}) + (s.v2_enabled ? "" : " · DOAR v1");
+    $("bal").innerHTML = Object.entries(s.balances).sort().map(([k,v]) => `<tr><td>${esc(k)}</td><td class="num">${v}</td></tr>`).join("") || `<tr><td colspan=2><i>niciun cont</i></td></tr>`;
+    $("stats").innerHTML = Object.entries(LABELS).map(([k,l]) => `<tr><td>${l}</td><td class="num">${s.stats[k]}</td></tr>`).join("");
+    $("ops").innerHTML = s.operations.map(o => `<tr><td>${esc(o.id)}</td><td>${esc(o.key.slice(0,12))}</td><td>${esc(o.account)}</td>
+      <td class="num">${o.amount}</td><td class="num">${o.balance_after}</td><td><span class="k ${o.status}">${o.status}</span></td>
+      <td><span class="k ${o.api_version}">${esc(o.api_version)}</span></td><td>${new Date(o.applied_at).toLocaleTimeString("ro-RO",{hour12:false})}</td></tr>`).join("");
+    if(!loaded){ loaded=true; const f=s.faults; $("drop_next").value=f.drop_response_next; $("drop_rate").value=f.drop_response_rate; $("slow").value=f.slow_response_ms; $("unav").value=f.unavailable_next; }
+  }catch(e){ $("clock").textContent = "serviciu indisponibil"; }
+}
+async function setFaults(){
+  const body = {drop_response_next:+$("drop_next").value, drop_response_rate:+$("drop_rate").value,
+    slow_response_ms:+$("slow").value, unavailable_next:+$("unav").value};
+  const r = await fetch("/admin/faults",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  $("fmsg").textContent = r.ok ? "aplicat" : "eroare";
+}
+refresh(); setInterval(refresh, 1000);
+</script>
+</body>
+</html>
