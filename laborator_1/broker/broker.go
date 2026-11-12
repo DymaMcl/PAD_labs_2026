@@ -1,0 +1,393 @@
+// Package broker implementeaza un broker de mesaje cu livrare at-least-once:
+// un mesaj ramane in coada pana cand consumer-ul confirma explicit (ACK)
+// efectul lui. Livrarile au un "lease" (timp de vizibilitate); daca lease-ul
+// expira fara ACK, mesajul este livrat din nou.
+package broker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/DymaMcl/PAD_labs_2026/laborator_1/contract"
+)
+
+// Erori expuse de broker (mapate pe coduri HTTP in http.go).
+var (
+	ErrStaleDelivery = errors.New("livrarea nu mai este activa (lease expirat, deja confirmata sau necunoscuta)")
+	ErrStaleSequence = errors.New("seq mai mic sau egal cu ultimul acceptat pentru (source, key)")
+	ErrNotFound      = errors.New("mesaj inexistent")
+)
+
+// Config parametrizeaza comportamentul brokerului.
+type Config struct {
+	MaxAttempts  int           // dupa atatea livrari esuate mesajul ajunge in DLQ
+	DefaultLease time.Duration // lease implicit daca consumer-ul nu cere altul
+	MaxLease     time.Duration
+	BackoffBase  time.Duration // intarzierea primei reincercari dupa NACK
+	BackoffMax   time.Duration
+	DedupWindow  time.Duration // cat timp tinem minte ID-urile vazute
+	Now          func() time.Time
+}
+
+// DefaultConfig intoarce valori rezonabile pentru laborator.
+func DefaultConfig() Config {
+	return Config{
+		MaxAttempts:  5,
+		DefaultLease: 5 * time.Second,
+		MaxLease:     5 * time.Minute,
+		BackoffBase:  500 * time.Millisecond,
+		BackoffMax:   30 * time.Second,
+		DedupWindow:  24 * time.Hour,
+		Now:          time.Now,
+	}
+}
+
+// State este starea unui mesaj in broker.
+type State string
+
+const (
+	StateReady    State = "ready"
+	StateInFlight State = "in_flight"
+	StateDead     State = "dead"
+)
+
+type entry struct {
+	msg        contract.Message
+	offset     uint64 // ordinea de acceptare in coada
+	state      State
+	attempts   int
+	notBefore  time.Time
+	deliveryID string
+	leaseUntil time.Time
+	consumer   string
+	lastError  string
+	enqueuedAt time.Time
+	deadAt     time.Time
+}
+
+type counters struct {
+	Published   uint64 `json:"published"`
+	Duplicates  uint64 `json:"duplicates"`
+	Rejected    uint64 `json:"rejected"`
+	Delivered   uint64 `json:"delivered"`
+	Redelivered uint64 `json:"redelivered"`
+	Acked       uint64 `json:"acked"`
+	Nacked      uint64 `json:"nacked"`
+	Expired     uint64 `json:"lease_expired"`
+	DeadLetters uint64 `json:"dead_lettered"`
+	StaleAcks   uint64 `json:"stale_acks"`
+}
+
+type queue struct {
+	name       string
+	nextOffset uint64
+	pending    []*entry          // ready + in_flight, in ordinea de acceptare
+	byID       map[string]*entry // mesaje vii (pending + dead)
+	inflight   map[string]*entry // deliveryID -> entry
+	seen       map[string]time.Time
+	lastSeq    map[string]uint64 // source|key -> ultimul seq acceptat
+	stats      counters
+}
+
+func newQueue(name string) *queue {
+	return &queue{
+		name:     name,
+		byID:     map[string]*entry{},
+		inflight: map[string]*entry{},
+		seen:     map[string]time.Time{},
+		lastSeq:  map[string]uint64{},
+	}
+}
+
+// Broker este sigur pentru utilizare concurenta.
+type Broker struct {
+	cfg     Config
+	mu      sync.Mutex
+	queues  map[string]*queue
+	changed chan struct{} // inchis si recreat la orice schimbare (long-poll)
+	events  *eventLog
+}
+
+// New creeaza un broker in memorie.
+func New(cfg Config) *Broker {
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = 5
+	}
+	if cfg.DefaultLease <= 0 {
+		cfg.DefaultLease = 5 * time.Second
+	}
+	if cfg.MaxLease < cfg.DefaultLease {
+		cfg.MaxLease = cfg.DefaultLease
+	}
+	if cfg.DedupWindow <= 0 {
+		cfg.DedupWindow = 24 * time.Hour
+	}
+	return &Broker{
+		cfg:     cfg,
+		queues:  map[string]*queue{},
+		changed: make(chan struct{}),
+		events:  newEventLog(500),
+	}
+}
+
+func (b *Broker) queueLocked(name string) *queue {
+	q, ok := b.queues[name]
+	if !ok {
+		q = newQueue(name)
+		b.queues[name] = q
+	}
+	return q
+}
+
+func (b *Broker) notifyLocked() {
+	close(b.changed)
+	b.changed = make(chan struct{})
+}
+
+// PublishResult este raspunsul la publicare (ACK-ul brokerului catre producer).
+type PublishResult struct {
+	Status string `json:"status"` // "accepted" sau "duplicate"
+	Offset uint64 `json:"offset"`
+}
+
+func seqKey(m contract.Message) string { return m.Source + "|" + m.Key }
+
+// Publish valideaza si accepta un mesaj. Publicarea este idempotenta dupa ID:
+// un producer care nu a primit ACK poate retrimite in siguranta acelasi mesaj.
+func (b *Broker) Publish(queueName string, m contract.Message) (PublishResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	q := b.queueLocked(queueName)
+	now := b.cfg.Now()
+
+	if err := m.Validate(); err != nil {
+		q.stats.Rejected++
+		b.events.add(now, queueName, "rejected", m.ID, m.Key, err.Error())
+		return PublishResult{}, err
+	}
+	b.pruneSeenLocked(q, now)
+	if _, dup := q.seen[m.ID]; dup {
+		q.stats.Duplicates++
+		b.events.add(now, queueName, "duplicate", m.ID, m.Key, "publicare repetata ignorata")
+		return PublishResult{Status: "duplicate"}, nil
+	}
+	if last := q.lastSeq[seqKey(m)]; m.Seq <= last {
+		q.stats.Rejected++
+		b.events.add(now, queueName, "rejected", m.ID, m.Key, fmt.Sprintf("seq %d <= %d", m.Seq, last))
+		return PublishResult{}, fmt.Errorf("%w: primit %d, ultimul %d", ErrStaleSequence, m.Seq, last)
+	}
+
+	e := b.acceptLocked(q, m, now)
+	b.events.add(now, queueName, "published", m.ID, m.Key, fmt.Sprintf("offset=%d seq=%d", e.offset, m.Seq))
+	b.notifyLocked()
+	return PublishResult{Status: "accepted", Offset: e.offset}, nil
+}
+
+func (b *Broker) acceptLocked(q *queue, m contract.Message, now time.Time) *entry {
+	q.nextOffset++
+	e := &entry{msg: m, offset: q.nextOffset, state: StateReady, enqueuedAt: now}
+	q.pending = append(q.pending, e)
+	q.byID[m.ID] = e
+	q.seen[m.ID] = now
+	q.lastSeq[seqKey(m)] = m.Seq
+	q.stats.Published++
+	return e
+}
+
+func (b *Broker) pruneSeenLocked(q *queue, now time.Time) {
+	for id, t := range q.seen {
+		if now.Sub(t) > b.cfg.DedupWindow {
+			if _, live := q.byID[id]; !live {
+				delete(q.seen, id)
+			}
+		}
+	}
+}
+
+// reapLocked trateaza lease-urile expirate: livrarea este considerata esuata.
+func (b *Broker) reapLocked(now time.Time) {
+	for _, q := range b.queues {
+		for did, e := range q.inflight {
+			if now.Before(e.leaseUntil) {
+				continue
+			}
+			delete(q.inflight, did)
+			e.deliveryID = ""
+			q.stats.Expired++
+			e.lastError = fmt.Sprintf("lease expirat (consumer %s nu a confirmat)", e.consumer)
+			b.events.add(now, q.name, "lease_expired", e.msg.ID, e.msg.Key, fmt.Sprintf("tentativa %d", e.attempts))
+			e.state = StateReady
+			e.notBefore = now
+		}
+	}
+}
+
+// Receive preia pana la max mesaje pentru consumer. Daca nu exista mesaje
+// disponibile asteapta pana la wait (long-poll).
+func (b *Broker) Receive(ctx context.Context, queueName, consumer string, max int, lease, wait time.Duration) []contract.Delivery {
+	if max <= 0 {
+		max = 1
+	}
+	if lease <= 0 {
+		lease = b.cfg.DefaultLease
+	}
+	if lease > b.cfg.MaxLease {
+		lease = b.cfg.MaxLease
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		b.mu.Lock()
+		now := b.cfg.Now()
+		b.reapLocked(now)
+		out := b.takeLocked(b.queueLocked(queueName), consumer, max, lease, now)
+		ch := b.changed
+		b.mu.Unlock()
+
+		if len(out) > 0 || wait <= 0 {
+			return out
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+		// re-verificam periodic: lease-uri care expira, backoff care se termina
+		tick := 100 * time.Millisecond
+		if remaining < tick {
+			tick = remaining
+		}
+		t := time.NewTimer(tick)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil
+		case <-ch:
+		case <-t.C:
+		}
+		t.Stop()
+	}
+}
+
+func (b *Broker) takeLocked(q *queue, consumer string, max int, lease time.Duration, now time.Time) []contract.Delivery {
+	var out []contract.Delivery
+	for _, e := range q.pending {
+		if len(out) >= max {
+			break
+		}
+		if e.state != StateReady || now.Before(e.notBefore) {
+			continue
+		}
+		out = append(out, b.deliverLocked(q, e, consumer, lease, now))
+	}
+	return out
+}
+
+func (b *Broker) deliverLocked(q *queue, e *entry, consumer string, lease time.Duration, now time.Time) contract.Delivery {
+	e.attempts++
+	e.state = StateInFlight
+	e.deliveryID = contract.NewID()
+	e.leaseUntil = now.Add(lease)
+	e.consumer = consumer
+	q.inflight[e.deliveryID] = e
+	q.stats.Delivered++
+	kind := "delivered"
+	if e.attempts > 1 {
+		q.stats.Redelivered++
+		kind = "redelivered"
+	}
+	b.events.add(now, q.name, kind, e.msg.ID, e.msg.Key, fmt.Sprintf("catre %s, tentativa %d", consumer, e.attempts))
+	return contract.Delivery{
+		Message:    e.msg,
+		Queue:      q.name,
+		DeliveryID: e.deliveryID,
+		Attempt:    e.attempts,
+		LeaseUntil: e.leaseUntil,
+	}
+}
+
+func (q *queue) removePending(e *entry) {
+	for i, p := range q.pending {
+		if p == e {
+			q.pending = append(q.pending[:i], q.pending[i+1:]...)
+			return
+		}
+	}
+}
+
+// Ack confirma ca efectul mesajului a fost realizat; mesajul este eliminat.
+func (b *Broker) Ack(queueName, deliveryID string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.cfg.Now()
+	b.reapLocked(now)
+	q := b.queueLocked(queueName)
+	e, ok := q.inflight[deliveryID]
+	if !ok {
+		q.stats.StaleAcks++
+		b.events.add(now, queueName, "stale_ack", "", "", "delivery "+short(deliveryID))
+		return ErrStaleDelivery
+	}
+	delete(q.inflight, deliveryID)
+	q.removePending(e)
+	delete(q.byID, e.msg.ID)
+	q.stats.Acked++
+	b.events.add(now, queueName, "acked", e.msg.ID, e.msg.Key, fmt.Sprintf("dupa %d tentativ(e)", e.attempts))
+	b.notifyLocked()
+	return nil
+}
+
+// QueueStats este o fotografie a unei cozi.
+type QueueStats struct {
+	Name     string   `json:"name"`
+	Ready    int      `json:"ready"`
+	Delayed  int      `json:"delayed"`
+	InFlight int      `json:"in_flight"`
+	Dead     int      `json:"dead"`
+	Counters counters `json:"counters"`
+}
+
+// Stats intoarce statistici pentru toate cozile, sortate dupa nume.
+func (b *Broker) Stats() []QueueStats {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.cfg.Now()
+	b.reapLocked(now)
+	out := make([]QueueStats, 0, len(b.queues))
+	for _, q := range b.queues {
+		s := QueueStats{Name: q.name, Counters: q.stats}
+		for _, e := range q.pending {
+			switch {
+			case e.state == StateInFlight:
+				s.InFlight++
+			case now.Before(e.notBefore):
+				s.Delayed++
+			default:
+				s.Ready++
+			}
+		}
+		s.Dead = len(q.byID) - len(q.pending)
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Events intoarce evenimentele cu numar de ordine > since.
+func (b *Broker) Events(since uint64) []Event {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.events.since(since)
+}
+
+func short(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
