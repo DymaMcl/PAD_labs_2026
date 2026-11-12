@@ -127,7 +127,7 @@ Rulam scenariul de doua ori: cu consumer NAIV si cu consumer IDEMPOTENT.`)
 		ctx := context.Background()
 
 		l1, _ := consumer.OpenLedger(path)
-		w1 := consumer.NewWorker(e.c, l1, consumer.Options{Queue: "plati", Name: "c1", Idempotent: idem,
+		w1 := consumer.NewLocalWorker(e.c, l1, idem, consumer.Options{Queue: "plati", Name: "c1",
 			Lease: lease, CrashAfterEffect: 3, Logf: logf("c1")})
 		if err := w1.Run(ctx); !errors.Is(err, consumer.ErrCrashed) {
 			log.Fatalf("astepta cadere: %v", err)
@@ -135,7 +135,7 @@ Rulam scenariul de doua ori: cu consumer NAIV si cu consumer IDEMPOTENT.`)
 		log.Printf("  [sistem] procesul c1 a murit; repornim consumer-ul cu aceeasi stare locala (%s)", filepath.Base(path))
 
 		l2, _ := consumer.OpenLedger(path)
-		w2 := consumer.NewWorker(e.c, l2, consumer.Options{Queue: "plati", Name: "c1-restart", Idempotent: idem,
+		w2 := consumer.NewLocalWorker(e.c, l2, idem, consumer.Options{Queue: "plati", Name: "c1-restart",
 			Lease: lease, Wait: 200 * time.Millisecond, Logf: logf("c1'")})
 		_ = w2.RunUntilIdle(ctx, lease+500*time.Millisecond)
 		results = append(results, result{mode, l2.Summary(), queueStats(e)})
@@ -203,7 +203,7 @@ mesajul ajunge direct in DLQ si nu blocheaza restul cozii.`)
 	publish(e, "ACC-2", 10, 20, 30)
 
 	l, _ := consumer.OpenLedger("")
-	w := consumer.NewWorker(e.c, l, consumer.Options{Queue: "plati", Name: "c1", Idempotent: true,
+	w := consumer.NewLocalWorker(e.c, l, true, consumer.Options{Queue: "plati", Name: "c1",
 		FailRate: 0.4, Batch: 2, Wait: 100 * time.Millisecond, Logf: logf("c1")})
 	_ = w.RunUntilIdle(context.Background(), 1500*time.Millisecond)
 
@@ -238,8 +238,8 @@ fiecarei chei, deci ordinea seq pe fiecare cont trebuie sa ramana stricta.`)
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			w := consumer.NewWorker(e.c, l, consumer.Options{Queue: "plati", Name: fmt.Sprintf("c%d", i),
-				Idempotent: true, FailRate: 0.2, Batch: 2, ProcessDelay: time.Duration(i*7) * time.Millisecond,
+			w := consumer.NewLocalWorker(e.c, l, true, consumer.Options{Queue: "plati", Name: fmt.Sprintf("c%d", i),
+				FailRate: 0.2, Batch: 2, ProcessDelay: time.Duration(i*7) * time.Millisecond,
 				Wait: 100 * time.Millisecond})
 			_ = w.RunUntilIdle(context.Background(), time.Second)
 		}(i)

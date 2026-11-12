@@ -49,7 +49,7 @@ func runCriticalScenario(t *testing.T, idempotent bool) Summary {
 	defer cancel()
 
 	l1, _ := OpenLedger(path)
-	w1 := NewWorker(c, l1, Options{Queue: "plati", Name: "c1", Idempotent: idempotent, Lease: lease, CrashAfterEffect: 3})
+	w1 := NewLocalWorker(c, l1, idempotent, Options{Queue: "plati", Name: "c1", Lease: lease, CrashAfterEffect: 3})
 	if err := w1.Run(ctx); !errors.Is(err, ErrCrashed) {
 		t.Fatalf("astepta cadere simulata, primit %v", err)
 	}
@@ -59,7 +59,7 @@ func runCriticalScenario(t *testing.T, idempotent bool) Summary {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w2 := NewWorker(c, l2, Options{Queue: "plati", Name: "c1-restart", Idempotent: idempotent, Lease: lease, Wait: 100 * time.Millisecond})
+	w2 := NewLocalWorker(c, l2, idempotent, Options{Queue: "plati", Name: "c1-restart", Lease: lease, Wait: 100 * time.Millisecond})
 	if err := w2.RunUntilIdle(ctx, lease+400*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestPoisonMessageGoesToDLQ(t *testing.T) {
 	c := startBroker(t)
 	publishCredits(t, c, "ACC-1", 100, -5, 100)
 	l, _ := OpenLedger("")
-	w := NewWorker(c, l, Options{Queue: "plati", Name: "c", Idempotent: true})
+	w := NewLocalWorker(c, l, true, Options{Queue: "plati", Name: "c"})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	w.RunUntilIdle(ctx, 300*time.Millisecond)
@@ -98,7 +98,7 @@ func TestTransientFailuresAreRetried(t *testing.T) {
 	publishCredits(t, c, "ACC-1", 10, 20, 30, 40)
 	publishCredits(t, c, "ACC-2", 1, 2, 3)
 	l, _ := OpenLedger("")
-	w := NewWorker(c, l, Options{Queue: "plati", Name: "c", Idempotent: true, FailRate: 0.3, Batch: 2})
+	w := NewLocalWorker(c, l, true, Options{Queue: "plati", Name: "c", FailRate: 0.3, Batch: 2})
 	w.rnd.Seed(42)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
