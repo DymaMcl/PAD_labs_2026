@@ -1,0 +1,16 @@
+# build
+/bin/
+*.exe
+*.test
+*.out
+
+# date locale generate la rulare
+data/
+*.journal
+*.ledger.json
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
