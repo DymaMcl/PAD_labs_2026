@@ -1,0 +1,12 @@
+[package]
+name = "pad-panou"
+version = "1.0.0"
+edition = "2021"
+description = "Panou de control web (Rust) pentru laboratoarele PAD 1 si 2"
+authors = ["Dumitru Micleușanu"]
+
+# Fara dependinte externe: doar biblioteca standard Rust.
+[dependencies]
+
+[profile.release]
+opt-level = 2
