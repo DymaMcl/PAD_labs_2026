@@ -130,7 +130,9 @@ impl Supervisor {
         let mut g = self.inner.lock().unwrap();
         g.refresh();
         g.procs.iter().any(|e| {
-            e.child.is_some() && e.info.kind == kind && name.is_none() || name == Some(e.info.name.as_str())
+            e.child.is_some()
+                && e.info.kind == kind
+                && (name.is_none() || name == Some(e.info.name.as_str()))
         })
     }
 
@@ -362,6 +364,18 @@ mod tests {
         assert!(s.stop(id).is_err());
         s.clear_finished();
         assert!(s.snapshot(0).0.is_empty());
+    }
+
+    #[test]
+    fn finished_process_can_be_restarted_with_same_name() {
+        let s = Supervisor::new();
+        let (lab, mut spec) = shell_spec("exit 3");
+        spec.unique = true;
+        let id = s.start(&lab, spec.clone()).unwrap();
+        wait_status(&s, id, "exited");
+        assert!(!s.is_running("build", Some("test")));
+        s.start(&lab, spec)
+            .expect("un proces terminat nu trebuie sa blocheze repornirea");
     }
 
     #[test]

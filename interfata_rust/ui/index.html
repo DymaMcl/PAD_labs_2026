@@ -1,1 +1,238 @@
-<!doctype html><title>stub</title>
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panou de control PAD · Rust</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <div class="logo">⚙</div>
+    <div>
+      <h1>Panou de control PAD</h1>
+      <div class="sub">interfață web în Rust · laboratoarele 1 și 2 · Dumitru Micleușanu</div>
+    </div>
+  </div>
+  <nav class="tabs" id="labTabs"></nav>
+  <div class="chips">
+    <span class="chip" id="chipGo">Go: …</span>
+    <span class="chip" id="chipBroker"><i></i>broker</span>
+    <span class="chip lab2-only" id="chipAccounts"><i></i>serviciu conturi</span>
+  </div>
+</header>
+
+<div id="banner" class="banner hidden"></div>
+
+<main class="layout">
+  <!-- ═══════════ stânga: procese ═══════════ -->
+  <aside class="col side">
+    <section class="card">
+      <h2>Procese pornite din panou</h2>
+      <div id="procList" class="proclist"><p class="muted">Niciun proces.</p></div>
+      <div class="row gap">
+        <button class="ghost" onclick="api('/api/stopall',{},'Toate procesele au fost oprite')">Oprește tot</button>
+        <button class="ghost" onclick="api('/api/clear',{},'Lista a fost curățată')">Curăță lista</button>
+        <button class="ghost danger" onclick="resetData()" title="Șterge folderul data/ (jurnale, registre)">Șterge datele</button>
+      </div>
+      <div class="row gap mt">
+        <button onclick="build()">⚒ Compilează (go build)</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Producer</h2>
+      <div class="grid2">
+        <label>mesaje<input id="pCount" type="number" value="5" min="1"></label>
+        <label>conturi<input id="pAcc" type="number" value="1" min="1"></label>
+        <label>sumă<input id="pAmt" type="number" value="100" min="1"></label>
+        <label>otrăvit la fiecare al N-lea<input id="pPoison" type="number" value="0" min="0"></label>
+      </div>
+      <label class="check"><input id="pInvalid" type="checkbox"> trimite și un mesaj care încalcă contractul</label>
+      <button onclick="startProducer()">▶ Trimite mesajele</button>
+    </section>
+
+    <section class="card">
+      <h2>Consumer</h2>
+      <div class="grid2">
+        <label>nume<input id="cName" value="c1"></label>
+        <label>lease (s)<input id="cLease" type="number" value="5" min="1"></label>
+        <label>cade după efectul nr.<input id="cCrash" type="number" value="0" min="0"></label>
+        <label>erori tranzitorii (0..1)<input id="cFail" type="number" value="0" step="0.1" min="0" max="1"></label>
+      </div>
+      <div class="grid2 lab2-only">
+        <label>efect<select id="cEffect"><option value="remote">serviciu gRPC (lab 2)</option><option value="local">registru local (lab 1)</option></select></label>
+        <label>contract<select id="cApi"><option value="auto">auto (v2 → v1)</option><option value="v1">v1</option></select></label>
+      </div>
+      <label class="check"><input id="cNaive" type="checkbox"> NAIV (fără deduplicare, doar efect local)</label>
+      <button onclick="startConsumer()">▶ Pornește consumer-ul</button>
+    </section>
+  </aside>
+
+  <!-- ═══════════ mijloc: scenarii ═══════════ -->
+  <section class="col center">
+
+    <!-- ───── Laboratorul 1 ───── -->
+    <div class="lab1-only">
+      <section class="card scenario">
+        <h2><span class="num">1</span> Scenariul critic — consumer-ul cade după efect, înainte de ACK</h2>
+        <p class="explain">Producer-ul trimite 5 plăți de 100 pe ACC-1 (corect: <b>500</b>). Consumer-ul aplică efectul mesajului #3 și „cade” fără ACK. Brokerul relivrează mesajul după expirarea lease-ului. Consumer-ul <b>naiv</b> pune banii a doua oară; cel <b>idempotent</b> recunoaște mesajul în inbox.</p>
+        <div class="row gap">
+          <label class="radio"><input type="radio" name="l1mode" value="naiv" checked> NAIV</label>
+          <label class="radio"><input type="radio" name="l1mode" value="idem"> IDEMPOTENT</label>
+          <button class="primary" onclick="lab1Critical()">▶ Rulează automat</button>
+        </div>
+        <ol class="steps">
+          <li><button class="step" onclick="ensureBroker(3)">Pornește brokerul (lease 3s)</button></li>
+          <li><button class="step" onclick="startProducerWith({count:5,accounts:1,amount:100})">Trimite 5 × 100 pe ACC-1</button></li>
+          <li><button class="step" onclick="startL1Consumer(true)">Pornește consumer-ul care cade după efectul #3</button></li>
+          <li><button class="step" onclick="startL1Consumer(false)">Repornește consumer-ul (după ~3s)</button></li>
+        </ol>
+        <div id="l1Result" class="result"></div>
+      </section>
+
+      <section class="card scenario">
+        <h2><span class="num">2</span> ACK pierdut către producer — retry + deduplicare</h2>
+        <p class="explain">Brokerul salvează mesajul, dar „pierde” răspunsul. Producer-ul retrimite <b>același ID</b>; brokerul îl recunoaște ca duplicat. Urmărește contorul <i>duplicate</i> din panoul brokerului.</p>
+        <div class="row gap">
+          <label class="inline">pierde ACK <input id="dropAck" type="range" min="0" max="90" step="10" value="50" oninput="dropAckVal.textContent=this.value+'%'"> <b id="dropAckVal">50%</b></label>
+          <button onclick="setDropAck()">Aplică</button>
+          <button onclick="startProducerWith({count:10,accounts:1,amount:10})">Trimite 10 mesaje</button>
+        </div>
+      </section>
+
+      <section class="card scenario">
+        <h2><span class="num">3</span> NACK, retry cu backoff și dead-letter queue</h2>
+        <p class="explain">Consumer-ul eșuează tranzitoriu în 40% din cazuri (reîncercare cu pauze tot mai mari). Fiecare al 4-lea mesaj are sumă negativă: e respins definitiv și ajunge în DLQ, de unde poate fi readus (replay).</p>
+        <div class="row gap">
+          <button onclick="ensureBroker(5).then(()=>startProducerWith({count:8,accounts:2,amount:100,poison_every:4}))">Trimite 8 mesaje (2 otrăvite)</button>
+          <button onclick="startConsumerWith({name:'c-retry',fail_rate:0.4,lease:5})">Consumer cu 40% erori</button>
+        </div>
+      </section>
+
+      <section class="card scenario">
+        <h2><span class="num">4</span> Ordonare per cheie cu 3 consumeri în paralel</h2>
+        <p class="explain">Mesajele aceluiași cont sunt livrate strict în ordine, chiar dacă 3 consumeri lucrează simultan. În registre, coloana <i>încălcări de ordine</i> trebuie să rămână 0.</p>
+        <div class="row gap">
+          <button onclick="lab1Ordering()">▶ 24 mesaje pe 4 conturi + 3 consumeri</button>
+        </div>
+      </section>
+
+      <section class="card scenario">
+        <h2><span class="num">5</span> Consumer manual — decizi tu ACK / NACK / cădere</h2>
+        <div class="row gap">
+          <label class="inline">lease (ms) <input id="mLease" type="number" value="8000" style="width:90px"></label>
+          <button onclick="manualReceive()">Preia un mesaj</button>
+        </div>
+        <div id="manual"></div>
+      </section>
+    </div>
+
+    <!-- ───── Laboratorul 2 ───── -->
+    <div class="lab2-only">
+      <section class="card scenario">
+        <h2><span class="num">1</span> Scenariul critic — răspunsul se pierde după efectuarea operației</h2>
+        <p class="explain">Consumer-ul cere serviciului „pune 100 pe ACC-1”. Serviciul execută și salvează operația, dar <b>răspunsul se pierde</b>. Clientul nu știe dacă s-a executat; reîncearcă cu <b>aceeași cheie de idempotență</b>, iar serviciul răspunde „deja făcut” fără să mai pună banii.</p>
+        <div class="row gap">
+          <button class="primary" onclick="lab2Critical()">▶ Rulează automat</button>
+        </div>
+        <ol class="steps">
+          <li><button class="step" onclick="ensureLab2Services()">Pornește brokerul și serviciul de conturi</button></li>
+          <li><button class="step" onclick="setFaults({drop_response_next:1})">Serviciul pierde următorul răspuns</button></li>
+          <li><button class="step" onclick="startProducerWith({count:1,accounts:1,amount:100})">Trimite o plată de 100</button></li>
+          <li><button class="step" onclick="startConsumerWith({name:'c1',effect:'remote'})">Pornește consumer-ul (gRPC)</button></li>
+        </ol>
+        <div id="l2Result" class="result"></div>
+      </section>
+
+      <section class="card scenario">
+        <h2><span class="num">2</span> Defecte în serviciu — rezultate ambigue</h2>
+        <p class="explain">„Răspuns pierdut” și „întârziere după commit”: operația <b>s-a făcut</b>, dar clientul primește eroare. „Refuz înainte de execuție”: operația <b>nu</b> s-a făcut. Clientul de integrare le deosebește prin reîncercare cu aceeași cheie și <code>GetOperation</code>.</p>
+        <div class="grid4">
+          <label>pierde următoarele N răspunsuri<input id="fDropNext" type="number" value="0" min="0"></label>
+          <label>probabilitate pierdere<input id="fDropRate" type="number" value="0.3" step="0.1" min="0" max="1"></label>
+          <label>întârziere după commit (ms)<input id="fSlow" type="number" value="0" min="0"></label>
+          <label>refuz înainte de execuție (N)<input id="fUnav" type="number" value="0" min="0"></label>
+        </div>
+        <div class="row gap">
+          <button onclick="applyFaultsForm()">Aplică defectele</button>
+          <button class="ghost" onclick="setFaults({})">Fără defecte</button>
+          <button onclick="startProducerWith({count:12,accounts:3,amount:100})">Trimite 12 plăți pe 3 conturi</button>
+        </div>
+      </section>
+
+      <section class="card scenario">
+        <h2><span class="num">3</span> Fallback — serviciul cade și revine</h2>
+        <p class="explain">Cu serviciul oprit, circuit breaker-ul se deschide și consumer-ul <b>nu mai preia mesaje</b> (⏸). Mesajele așteaptă în broker, fără să fie pierdute. La repornire, consumer-ul reia (▶) și soldurile ies exacte.</p>
+        <div class="row gap">
+          <button class="danger" onclick="stopKind('accounts')">■ Oprește serviciul</button>
+          <button onclick="startAccounts()">▶ Pornește serviciul</button>
+          <button onclick="startProducerWith({count:6,accounts:3,amount:100})">Trimite 6 plăți</button>
+        </div>
+      </section>
+
+      <section class="card scenario">
+        <h2><span class="num">4</span> Versionare și compatibilitate</h2>
+        <p class="explain">Serviciul expune <code>accounts.v1</code> și <code>accounts.v2</code> în paralel. Un consumer forțat pe v1 și unul nou (v2) lucrează pe aceeași stare; în tabelul operațiilor coloana <i>api</i> arată versiunea. Un <b>server vechi</b> (doar v1) face clientul nou să treacă singur pe v1.</p>
+        <div class="row gap">
+          <button onclick="startConsumerWith({name:'c-v1',effect:'remote',api:'v1'})">Consumer v1</button>
+          <button onclick="startConsumerWith({name:'c-v2',effect:'remote',api:'auto'})">Consumer v2 (auto)</button>
+          <button class="ghost" onclick="restartAccounts({disable_v2:1})">Repornește ca server VECHI (doar v1)</button>
+          <button class="ghost" onclick="restartAccounts({})">Repornește server nou</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>Demo automat (programul <code>demo</code> din laborator)</h2>
+      <div class="row gap">
+        <select id="demoScenario"></select>
+        <button class="primary" onclick="runDemo()">▶ Rulează demo-ul</button>
+        <span class="muted">rezultatul apare în jurnalul de mai jos</span>
+      </div>
+    </section>
+  </section>
+
+  <!-- ═══════════ dreapta: stare live ═══════════ -->
+  <aside class="col live">
+    <section class="card">
+      <h2>Broker · coada <code>plati</code></h2>
+      <div id="brokerBox"><p class="muted">Brokerul nu rulează.</p></div>
+    </section>
+
+    <section class="card lab2-only">
+      <h2>Serviciul de conturi (gRPC :7080)</h2>
+      <div id="accBox"><p class="muted">Serviciul nu rulează.</p></div>
+    </section>
+
+    <section class="card">
+      <h2>Registrele locale ale consumerilor</h2>
+      <div id="ledgerBox"><p class="muted">Niciun registru încă (apar pentru consumerii cu efect local).</p></div>
+    </section>
+
+    <section class="card">
+      <h2>Dead-letter queue</h2>
+      <div id="dlqBox"><p class="muted">Gol.</p></div>
+    </section>
+  </aside>
+</main>
+
+<section class="card logs">
+  <div class="logs-head">
+    <h2>Jurnale</h2>
+    <div id="logTabs" class="logtabs"></div>
+    <label class="check small"><input id="autoScroll" type="checkbox" checked> derulare automată</label>
+  </div>
+  <pre id="logView" class="logview"></pre>
+</section>
+
+<section class="card events">
+  <h2>Evenimentele brokerului</h2>
+  <table class="tbl"><thead><tr><th>ora</th><th>eveniment</th><th>mesaj</th><th>detalii</th></tr></thead><tbody id="evBody"></tbody></table>
+</section>
+
+<div id="toast" class="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
